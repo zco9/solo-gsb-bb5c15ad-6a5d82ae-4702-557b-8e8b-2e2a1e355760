@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>控制端 · 口令控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎛 控制端 · 口令控制台</h1>
+    <nav>
+      <a href="director.html">导演端</a>
+      <a href="position.html">岗位端</a>
+      <a href="index.html">首页</a>
+      <span id="conn">未连接</span>
+    </nav>
+  </header>
+  <main>
+    <div id="toast"></div>
+    <div class="status-banner" id="banner"></div>
+
+    <div class="card">
+      <h2>当前口令</h2>
+      <div id="cueArea"><p class="muted" style="text-align:center;padding:24px">等待开始</p></div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+
+    <div class="card">
+      <h2>目标岗位确认状态</h2>
+      <div id="targets"><span class="muted">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>操作</h2>
+      <div class="row">
+        <button id="btnStart" class="narrow">▶ 开始演出</button>
+        <button id="btnAdvance" class="narrow">⏭ 推进下一条</button>
+        <button id="btnReset" class="danger narrow">↺ 重置场次</button>
+      </div>
+      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。</p>
+    </div>
+
+    <div class="card">
+      <h2>序列进度</h2>
+      <table>
+        <thead><tr><th style="width:60px">序号</th><th>口令</th><th>目标岗位</th><th style="width:90px">状态</th></tr></thead>
+        <tbody id="seqTable"><tr><td colspan="4" class="muted">尚未创建序列</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const banner = document.getElementById('banner');
+    const cueArea = document.getElementById('cueArea');
+    const targetsEl = document.getElementById('targets');
+    const countdownEl = document.getElementById('countdown');
+    const seqTable = document.getElementById('seqTable');
+    const logEl = document.getElementById('log');
+    const toast = document.getElementById('toast');
+    const btnStart = document.getElementById('btnStart');
+    const btnAdvance = document.getElementById('btnAdvance');
+    const btnReset = document.getElementById('btnReset');
+
+    let toastTimer = null;
+    let lastState = null;
+    let countdownTimer = null;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.style.display = 'none'), 3000);
+    }
+
+    btnStart.onclick = () => client.send({ type: 'start' });
+    btnAdvance.onclick = () => client.send({ type: 'advance' });
+    btnReset.onclick = () => {
+      if (confirm('确定重置本场？当前口令进度将清空（日志保留）。')) {
+        client.send({ type: 'reset' });
+      }
+    };
+
+    function targetChip(state, t) {
+      const conf = state.confirmations[t];
+      const timedOut = state.timedOut.includes(t);
+      const online = state.onlinePositions.includes(t);
+      let cls = 'chip', label = CueClient.escapeHtml(t);
+      if (conf && conf.late) { cls += ' late'; label += ' · 迟到确认'; }
+      else if (conf) { cls += ' ok'; label += ' · 已确认'; }
+      else if (timedOut) { cls += ' timeout'; label += ' · 超时未确认'; }
+      else { label += ' · 待确认'; }
+      if (!online) { cls += ' offline'; label += '（离线）'; }
+      return `<span class="${cls}">${label}</span>`;
+    }
+
+    function render(state) {
+      lastState = state;
+      const active = state.phase === 'active';
+      const cue = state.currentCue;
+
+      // 按钮可用性
+      btnStart.disabled = active || state.sequence.length === 0 || state.phase === 'done';
+      btnAdvance.disabled = !active;
+      btnReset.disabled = state.phase === 'idle' && state.sequence.length === 0;
+
+      // 顶部横幅
+      banner.className = 'status-banner';
+      if (state.phase === 'done') {
+        banner.classList.add('show');
+        banner.textContent = '🎉 全部口令已完成';
+      } else if (active && state.timedOut.length > 0) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `⚠ 以下岗位超时未确认：${state.timedOut.join('、')}（可等待其迟到确认）`;
+      }
+
+      // 当前口令
+      if (active && cue) {
+        cueArea.innerHTML =
+          `<div class="big-cue"><span class="cue-seq">第 ${cue.seq} 条 / 共 ${state.sequence.length} 条</span>` +
+          `${CueClient.escapeHtml(cue.text)}</div>`;
+      } else if (state.phase === 'done') {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">本场演出序列已全部完成</p>';
+      } else {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">等待开始（请先在导演端创建序列）</p>';
+      }
+
+      // 目标岗位
+      targetsEl.innerHTML = active && cue
+        ? cue.targets.map((t) => targetChip(state, t)).join('')
+        : '<span class="muted">—</span>';
+
+      // 序列进度
+      if (state.sequence.length === 0) {
+        seqTable.innerHTML = '<tr><td colspan="4" class="muted">尚未创建序列</td></tr>';
+      } else {
+        seqTable.innerHTML = state.sequence.map((c, i) => {
+          let status;
+          if (state.phase === 'done' || i < state.currentIndex) status = '<span class="chip ok">已完成</span>';
+          else if (active && i === state.currentIndex) status = '<span class="chip late">进行中</span>';
+          else status = '<span class="chip">待执行</span>';
+          const cur = active && i === state.currentIndex;
+          return `<tr class="${cur ? 'current-row' : ''}"><td>${c.seq}</td>` +
+            `<td>${CueClient.escapeHtml(c.text)}</td>` +
+            `<td>${c.targets.map((t) => `<span class="chip">${CueClient.escapeHtml(t)}</span>`).join('')}</td>` +
+            `<td>${status}</td></tr>`;
+        }).join('');
+      }
+
+      logEl.innerHTML = state.log.length
+        ? CueClient.renderLog(state.log)
+        : '<span class="muted">暂无事件</span>';
+
+      // 倒计时（以服务端时间为准，本地每秒刷新显示）
+      clearInterval(countdownTimer);
+      if (active && state.deadline) {
+        const offset = state.serverNow - Date.now();
+        const tick = () => {
+          const remain = Math.max(0, state.deadline - (Date.now() + offset));
+          countdownEl.textContent = remain > 0
+            ? `确认倒计时：${Math.ceil(remain / 1000)} 秒`
+            : '已超时，等待迟到确认…';
+        };
+        tick();
+        countdownTimer = setInterval(tick, 500);
+      } else {
+        countdownEl.textContent = '';
+      }
+    }
+
+    const client = CueClient.connect({
+      role: 'control',
+      onState: render,
+      onError: showToast,
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+  </script>
+</body>
+</html>
