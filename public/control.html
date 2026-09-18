@@ -29,6 +29,7 @@
     <div class="card">
       <h2>目标岗位确认状态</h2>
       <div id="targets"><span class="muted">—</span></div>
+      <div class="substitute-panel" id="subPanel" style="display:none"></div>
     </div>
 
     <div class="card">
@@ -38,7 +39,7 @@
         <button id="btnAdvance" class="narrow">⏭ 推进下一条</button>
         <button id="btnReset" class="danger narrow">↺ 重置场次</button>
       </div>
-      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。</p>
+      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。目标未确认时可点「替岗」，指定一名在线岗位临时接管（仅对本条口令生效）。</p>
     </div>
 
     <div class="card">
@@ -64,6 +65,7 @@
     const countdownEl = document.getElementById('countdown');
     const seqTable = document.getElementById('seqTable');
     const logEl = document.getElementById('log');
+    const subPanel = document.getElementById('subPanel');
     const toast = document.getElementById('toast');
     const btnStart = document.getElementById('btnStart');
     const btnAdvance = document.getElementById('btnAdvance');
@@ -72,6 +74,7 @@
     let toastTimer = null;
     let lastState = null;
     let countdownTimer = null;
+    let substitutingFor = null; // 正在为其选择替补的原岗位
 
     function showToast(msg) {
       toast.textContent = msg;
@@ -88,17 +91,71 @@
       }
     };
 
-    function targetChip(state, t) {
+    function targetChip(state, t, opts = {}) {
       const conf = state.confirmations[t];
       const timedOut = state.timedOut.includes(t);
       const online = state.onlinePositions.includes(t);
       let cls = 'chip', label = CueClient.escapeHtml(t);
+      // 原岗位已被替岗：划线置灰，标注接管的替补
+      if (opts.subbedOut) {
+        return `<span class="${cls} subbed">${label} · 已由 ${CueClient.escapeHtml(opts.subTo)} 接管</span>`;
+      }
       if (conf && conf.late) { cls += ' late'; label += ' · 迟到确认'; }
       else if (conf) { cls += ' ok'; label += ' · 已确认'; }
       else if (timedOut) { cls += ' timeout'; label += ' · 超时未确认'; }
       else { label += ' · 待确认'; }
+      if (opts.isSub) label += '（替岗）';
       if (!online) { cls += ' offline'; label += '（离线）'; }
       return `<span class="${cls}">${label}</span>`;
+    }
+
+    // 点击目标旁的「替岗」按钮，展开替补选择面板
+    targetsEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-subfrom]');
+      if (!btn) return;
+      substitutingFor = btn.dataset.subfrom;
+      if (lastState) render(lastState);
+    });
+
+    function renderSubPanel(state) {
+      const active = state.phase === 'active';
+      const cue = state.currentCue;
+      const subs = state.substitutions || {};
+      // 口令推进、目标已确认或已被替岗时，自动收起选择面板
+      if (substitutingFor && (!active || !cue || !cue.targets.includes(substitutingFor) ||
+          subs[substitutingFor] || state.confirmations[substitutingFor])) {
+        substitutingFor = null;
+      }
+      if (!substitutingFor) {
+        subPanel.style.display = 'none';
+        subPanel.innerHTML = '';
+        return;
+      }
+      const from = CueClient.escapeHtml(substitutingFor);
+      // 替补候选：在线且不是本条有效目标
+      const candidates = state.onlinePositions.filter((p) => !(state.effectiveTargets || []).includes(p));
+      subPanel.style.display = 'block';
+      if (candidates.length === 0) {
+        subPanel.innerHTML =
+          `<div class="row"><span class="narrow muted">暂无可接管「${from}」的在线岗位（需在线且非本条有效目标）</span>` +
+          `<button class="secondary narrow" id="subCancel">取消</button></div>`;
+      } else {
+        subPanel.innerHTML =
+          `<div class="row"><span class="narrow">为「${from}」指定替补：</span>` +
+          `<select id="subSelect">${candidates.map((p) =>
+            `<option value="${CueClient.escapeHtml(p)}">${CueClient.escapeHtml(p)}</option>`).join('')}</select>` +
+          `<button class="narrow" id="subGo">确认替岗</button>` +
+          `<button class="secondary narrow" id="subCancel">取消</button></div>` +
+          `<p class="muted">接管后原岗位不可再确认本条口令，替补的确认计入全员确认；仅对本条口令生效，下一条仍按导演编排执行。</p>`;
+        document.getElementById('subGo').onclick = () => {
+          const to = document.getElementById('subSelect').value;
+          client.send({ type: 'substitute', from: substitutingFor, to });
+        };
+      }
+      document.getElementById('subCancel').onclick = () => {
+        substitutingFor = null;
+        render(lastState);
+      };
     }
 
     function render(state) {
@@ -132,10 +189,25 @@
         cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">等待开始（请先在导演端创建序列）</p>';
       }
 
-      // 目标岗位
-      targetsEl.innerHTML = active && cue
-        ? cue.targets.map((t) => targetChip(state, t)).join('')
-        : '<span class="muted">—</span>';
+      // 目标岗位（含临时替岗：原岗位划线，替补以有效目标参与确认）
+      if (active && cue) {
+        const subs = state.substitutions || {};
+        targetsEl.innerHTML = cue.targets.map((t) => {
+          const sub = subs[t];
+          if (sub) {
+            return targetChip(state, t, { subbedOut: true, subTo: sub.substitute }) +
+              targetChip(state, sub.substitute, { isSub: true });
+          }
+          let html = targetChip(state, t, {});
+          if (!state.confirmations[t]) {
+            html += `<button class="mini" data-subfrom="${CueClient.escapeHtml(t)}">⇄ 替岗</button>`;
+          }
+          return html;
+        }).join('');
+      } else {
+        targetsEl.innerHTML = '<span class="muted">—</span>';
+      }
+      renderSubPanel(state);
 
       // 序列进度
       if (state.sequence.length === 0) {

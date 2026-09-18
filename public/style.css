@@ -53,8 +53,9 @@ button.secondary { background: #333948; }
 button.secondary:hover:not(:disabled) { background: #404758; }
 button.danger { background: #a03a3a; }
 button.danger:hover:not(:disabled) { background: #b84545; }
+button.mini { padding: 3px 10px; font-size: 12px; border-radius: 10px; margin: 2px 4px 2px 0; }
 
-input[type="text"], input[type="number"] {
+input[type="text"], input[type="number"], select {
   background: #14161c;
   border: 1px solid #3a4052;
   border-radius: 6px;
@@ -63,7 +64,7 @@ input[type="text"], input[type="number"] {
   font-size: 14px;
   width: 100%;
 }
-input:focus { outline: none; border-color: #2f6fed; }
+input:focus, select:focus { outline: none; border-color: #2f6fed; }
 
 .row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
 .row > * { flex: 1; }
@@ -87,6 +88,15 @@ tr.current-row td { background: #24304a; }
 .chip.late { background: #4a3a1e; color: #f0c169; }
 .chip.timeout { background: #4a2b2b; color: #ff9c9c; }
 .chip.offline { opacity: 0.45; }
+.chip.subbed { opacity: 0.45; text-decoration: line-through; }
+
+.substitute-panel {
+  margin-top: 12px;
+  padding: 12px;
+  background: #14161c;
+  border: 1px solid #2c3040;
+  border-radius: 8px;
+}
 
 .big-cue {
   font-size: 34px;

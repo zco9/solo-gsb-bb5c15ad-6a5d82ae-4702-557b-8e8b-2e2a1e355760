@@ -79,6 +79,7 @@ const CueClient = (() => {
     'confirm': '岗位确认',
     'confirm-late': '迟到确认',
     'confirm-duplicate': '重复确认',
+    'position-substituted': '临时替岗',
     'sequence-finished': '全部口令完成',
     'session-reset': '场次重置',
     'position-online': '岗位上线',
