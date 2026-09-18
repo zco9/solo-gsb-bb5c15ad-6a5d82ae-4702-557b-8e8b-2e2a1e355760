@@ -85,9 +85,19 @@
     function render(state) {
       const active = state.phase === 'active';
       const cue = state.currentCue;
-      const targeted = active && cue && myPosition && cue.targets.includes(myPosition);
-      const myConf = targeted && state.confirmations[myPosition];
-      const iTimedOut = targeted && state.timedOut.includes(myPosition);
+      const subs = state.substitutions || {};
+      // 本岗位对应的有效槽位：被指定替岗时，接管原岗位的槽位
+      let mySlot = null, substituteFor = null, substitutedOut = false;
+      if (active && cue && myPosition) {
+        for (const t of cue.targets) {
+          const eff = subs[t] ? subs[t].substitute : t;
+          if (eff === myPosition) { mySlot = t; if (subs[t]) substituteFor = t; break; }
+        }
+        substitutedOut = cue.targets.includes(myPosition) && !!subs[myPosition];
+      }
+      const targeted = mySlot !== null;
+      const myConf = targeted && state.confirmations[mySlot];
+      const iTimedOut = targeted && state.timedOut.includes(mySlot);
 
       // 横幅
       banner.className = 'status-banner';
@@ -96,18 +106,31 @@
         banner.textContent = '⚠ 已迟到确认（超过确认时限）';
       } else if (myConf) {
         banner.classList.add('show');
-        banner.textContent = '✔ 已确认，等待控制端推进';
+        banner.textContent = substituteFor
+          ? `✔ 已替「${substituteFor}」确认，等待控制端推进`
+          : '✔ 已确认，等待控制端推进';
       } else if (iTimedOut) {
         banner.classList.add('show', 'warn');
         banner.textContent = '⚠ 已超时！请立即确认（将标记为迟到确认）';
+      } else if (substituteFor) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `🔁 控制端指定你临时替岗「${substituteFor}」，请代为确认本条口令`;
+      } else if (substitutedOut) {
+        banner.classList.add('show');
+        banner.textContent = `🔁 本条口令已由「${subs[myPosition].substitute}」替岗，本岗位无需确认`;
       }
 
       // 口令展示
       if (active && cue) {
         const head = `<span class="cue-seq">第 ${cue.seq} 条 / 共 ${state.sequence.length} 条</span>`;
-        const note = targeted
-          ? ''
-          : '<p class="muted" style="text-align:center">本条口令不涉及本岗位，无需操作</p>';
+        let note = '';
+        if (substituteFor) {
+          note = `<p class="muted" style="text-align:center">🔁 你正在替岗「${CueClient.escapeHtml(substituteFor)}」，请确认本条口令</p>`;
+        } else if (substitutedOut) {
+          note = `<p class="muted" style="text-align:center">本岗位已由「${CueClient.escapeHtml(subs[myPosition].substitute)}」替岗，本条无需确认</p>`;
+        } else if (!targeted) {
+          note = '<p class="muted" style="text-align:center">本条口令不涉及本岗位，无需操作</p>';
+        }
         cueArea.innerHTML = `<div class="big-cue">${head}${CueClient.escapeHtml(cue.text)}</div>${note}`;
       } else if (state.phase === 'done') {
         cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">本场演出序列已全部完成</p>';
@@ -115,12 +138,14 @@
         cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">等待控制端发出口令</p>';
       }
 
-      // 确认按钮：仅目标岗位且未确认时可点
+      // 确认按钮：仅有效目标（含被指定的替岗）且未确认时可点
       btnConfirm.disabled = !targeted || !!myConf;
       if (!myPosition) confirmHint.textContent = '请先在上方输入岗位名并上岗';
       else if (!active) confirmHint.textContent = '当前没有进行中的口令';
+      else if (substitutedOut) confirmHint.textContent = `本岗位已被「${subs[myPosition].substitute}」替岗，无需确认`;
       else if (!targeted) confirmHint.textContent = `本岗位「${myPosition}」不是本条口令的目标岗位`;
       else if (myConf) confirmHint.textContent = '已确认，请勿重复操作（重复确认将被标记）';
+      else if (substituteFor) confirmHint.textContent = `你正在替岗「${substituteFor}」，请确认收到口令`;
       else confirmHint.textContent = '请确认收到口令';
 
       logEl.innerHTML = state.log.length

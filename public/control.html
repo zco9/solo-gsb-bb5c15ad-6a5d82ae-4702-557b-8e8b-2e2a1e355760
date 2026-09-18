@@ -31,6 +31,20 @@
       <div id="targets"><span class="muted">—</span></div>
     </div>
 
+    <div class="card" id="subCard" style="display:none">
+      <h2>临时替岗（仅当前口令生效）</h2>
+      <div class="row">
+        <label class="sub-field">未确认目标
+          <select id="subFrom"></select>
+        </label>
+        <label class="sub-field">在线替补
+          <select id="subTo"></select>
+        </label>
+        <button id="btnSub" class="narrow">🔁 指定替岗</button>
+      </div>
+      <p class="muted" id="subHint">将未确认目标的确认权移交给一名在线岗位；推进到下一条后自动恢复导演编排的原目标。</p>
+    </div>
+
     <div class="card">
       <h2>操作</h2>
       <div class="row">
@@ -68,6 +82,11 @@
     const btnStart = document.getElementById('btnStart');
     const btnAdvance = document.getElementById('btnAdvance');
     const btnReset = document.getElementById('btnReset');
+    const subCard = document.getElementById('subCard');
+    const subFrom = document.getElementById('subFrom');
+    const subTo = document.getElementById('subTo');
+    const subHint = document.getElementById('subHint');
+    const btnSub = document.getElementById('btnSub');
 
     let toastTimer = null;
     let lastState = null;
@@ -87,12 +106,28 @@
         client.send({ type: 'reset' });
       }
     };
+    btnSub.onclick = () => {
+      if (!subFrom.value || !subTo.value) return showToast('请选择未确认目标与在线替补');
+      client.send({ type: 'substitute', from: subFrom.value, to: subTo.value });
+    };
+
+    // 重渲染时尽量保留用户正在选择的值
+    function fillSelect(sel, items) {
+      const prev = sel.value;
+      sel.innerHTML = items.length
+        ? items.map((v) => `<option value="${CueClient.escapeHtml(v)}">${CueClient.escapeHtml(v)}</option>`).join('')
+        : '<option value="">（无）</option>';
+      if (items.includes(prev)) sel.value = prev;
+    }
 
     function targetChip(state, t) {
+      const sub = (state.substitutions || {})[t];
+      const eff = sub ? sub.substitute : t; // 有效目标（被替岗后为替补岗位）
       const conf = state.confirmations[t];
       const timedOut = state.timedOut.includes(t);
-      const online = state.onlinePositions.includes(t);
-      let cls = 'chip', label = CueClient.escapeHtml(t);
+      const online = state.onlinePositions.includes(eff);
+      let cls = 'chip', label = CueClient.escapeHtml(eff);
+      if (sub) { cls += ' sub'; label += `（替 ${CueClient.escapeHtml(t)}）`; }
       if (conf && conf.late) { cls += ' late'; label += ' · 迟到确认'; }
       else if (conf) { cls += ' ok'; label += ' · 已确认'; }
       else if (timedOut) { cls += ' timeout'; label += ' · 超时未确认'; }
@@ -112,13 +147,18 @@
       btnReset.disabled = state.phase === 'idle' && state.sequence.length === 0;
 
       // 顶部横幅
+      const subs = state.substitutions || {};
+      const effName = (t) => {
+        const s = subs[t];
+        return s ? `${s.substitute}（替 ${t}）` : t;
+      };
       banner.className = 'status-banner';
       if (state.phase === 'done') {
         banner.classList.add('show');
         banner.textContent = '🎉 全部口令已完成';
       } else if (active && state.timedOut.length > 0) {
         banner.classList.add('show', 'warn');
-        banner.textContent = `⚠ 以下岗位超时未确认：${state.timedOut.join('、')}（可等待其迟到确认）`;
+        banner.textContent = `⚠ 以下岗位超时未确认：${state.timedOut.map(effName).join('、')}（可等待其迟到确认）`;
       }
 
       // 当前口令

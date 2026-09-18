@@ -23,8 +23,9 @@ const state = {
   sequence: [], // [{ id, seq, text, targets: [string] }]
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   currentIndex: -1,
-  confirmations: {}, // position -> { clientId, at, late }
-  timedOut: [], // 超时未确认的岗位
+  confirmations: {}, // 目标槽位（原岗位）-> { clientId, at, late, by }（替岗时 by 为替补岗位）
+  substitutions: {}, // 当前口令的临时替岗：原岗位 -> { substitute, at }，仅当前口令有效
+  timedOut: [], // 超时未确认的岗位（按目标槽位记录）
   cueStartedAt: null,
   deadline: null,
   log: [], // [{ ts, event, detail }]
@@ -55,6 +56,11 @@ function allConfirmed() {
   return cue.targets.every((t) => state.confirmations[t]);
 }
 
+// 当前口令的有效目标：应用临时替岗后的岗位名，与原 targets 槽位一一对应
+function effectiveTargets(cue) {
+  return cue.targets.map((t) => (state.substitutions[t] ? state.substitutions[t].substitute : t));
+}
+
 // 断线重连恢复依赖全量状态快照：任何变化都广播完整公开状态
 function publicState() {
   return {
@@ -65,6 +71,7 @@ function publicState() {
     currentIndex: state.currentIndex,
     currentCue: currentCue(),
     confirmations: state.confirmations,
+    substitutions: state.substitutions,
     timedOut: state.timedOut,
     cueStartedAt: state.cueStartedAt,
     deadline: state.deadline,
@@ -119,8 +126,9 @@ function activateCue(index) {
   clearCueTimer();
   state.currentIndex = index;
   state.phase = 'active';
-  // 关键：每条口令的确认/超时状态独立，绝不串入下一条
+  // 关键：每条口令的确认/替岗/超时状态独立，绝不串入下一条（下一条仍使用导演编排的原目标）
   state.confirmations = {};
+  state.substitutions = {};
   state.timedOut = [];
   state.cueStartedAt = Date.now();
   state.deadline = state.cueStartedAt + state.timeoutSec * 1000;
@@ -252,6 +260,7 @@ function handleMessage(ws, msg) {
       state.phase = 'idle';
       state.currentIndex = -1;
       state.confirmations = {};
+      state.substitutions = {};
       state.timedOut = [];
       state.cueStartedAt = null;
       state.deadline = null;
@@ -268,23 +277,65 @@ function handleMessage(ws, msg) {
       const cue = currentCue();
       if (!cue) return sendError(ws, '当前没有进行中的口令');
       const position = meta.position;
-      if (!cue.targets.includes(position)) {
+      // 确认权属于“有效目标”：被替岗的槽位只能由替补岗位确认
+      const slotIdx = effectiveTargets(cue).indexOf(position);
+      if (slotIdx === -1) {
+        const sub = state.substitutions[position];
+        if (cue.targets.includes(position) && sub) {
+          return sendError(ws, `岗位「${position}」已由「${sub.substitute}」替岗，无需确认`);
+        }
         return sendError(ws, `本条口令不涉及岗位「${position}」`);
       }
+      const slot = cue.targets[slotIdx];
       // 重复确认：实时标记进日志，不改变状态
-      if (state.confirmations[position]) {
+      if (state.confirmations[slot]) {
         addLog('confirm-duplicate', { seq: cue.seq, position });
         broadcastState();
         return;
       }
-      const late = state.timedOut.includes(position);
-      state.confirmations[position] = {
+      const late = state.timedOut.includes(slot);
+      state.confirmations[slot] = {
         clientId: meta.clientId,
         at: Date.now(),
         late,
+        by: position, // 实际确认岗位（替岗时与原目标不同）
       };
-      if (late) state.timedOut = state.timedOut.filter((t) => t !== position);
-      addLog(late ? 'confirm-late' : 'confirm', { seq: cue.seq, position });
+      if (late) state.timedOut = state.timedOut.filter((t) => t !== slot);
+      const detail = { seq: cue.seq, position };
+      if (slot !== position) detail.for = slot; // 替补代原岗位确认
+      addLog(late ? 'confirm-late' : 'confirm', detail);
+      broadcastState();
+      break;
+    }
+
+    // 临时替岗：控制端将某个未确认目标的确认权移交给一名在线岗位。
+    // 单条消息同步处理 + 单次状态变更，对本条口令而言是原子生效的。
+    case 'substitute': {
+      const cue = currentCue();
+      if (!cue) return sendError(ws, '当前没有进行中的口令');
+      const from = String(data.from || '').trim(); // 原岗位（未确认目标）
+      const to = String(data.to || '').trim(); // 替补岗位（在线）
+      if (!from || !to) return sendError(ws, '替岗需指定原岗位与替补岗位');
+      if (!cue.targets.includes(from)) {
+        return sendError(ws, `岗位「${from}」不是本条口令的目标岗位`);
+      }
+      if (state.confirmations[from]) {
+        return sendError(ws, `岗位「${from}」已确认，无需替岗`);
+      }
+      if (state.substitutions[from]) {
+        return sendError(ws, `岗位「${from}」已由「${state.substitutions[from].substitute}」替岗`);
+      }
+      if (to === from) return sendError(ws, '替补岗位不能与原岗位相同');
+      // 替补不能已是本条口令的有效目标（含其他槽位的替补）
+      if (effectiveTargets(cue).includes(to)) {
+        return sendError(ws, `岗位「${to}」已是本条口令的有效目标，不能作为替补`);
+      }
+      if (!onlinePositions.has(to)) {
+        return sendError(ws, `岗位「${to}」不在线，无法指定替岗`);
+      }
+      // 仅更新当前口令的有效目标与确认权限；推进/重置时随确认表一起清空
+      state.substitutions[from] = { substitute: to, at: Date.now() };
+      addLog('position-substituted', { seq: cue.seq, from, to });
       broadcastState();
       break;
     }

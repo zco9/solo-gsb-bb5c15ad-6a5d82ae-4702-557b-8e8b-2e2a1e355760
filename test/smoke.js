@@ -1,4 +1,4 @@
-// 端到端冒烟测试：模拟导演、控制端、两个岗位端走完整流程
+// 端到端冒烟测试：模拟导演、控制端、三个岗位端走完整流程（含临时替岗）
 'use strict';
 const WebSocket = require('ws');
 
@@ -60,10 +60,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   director.send({ type: 'setSequence', timeoutSec: 3, cues: [
     { text: '灯光渐暗', targets: ['灯光'] },
     { text: '音乐起，道具就位', targets: ['音响', '道具'] },
+    { text: '灯光聚焦主角', targets: ['灯光'] },
+    { text: '音乐渐弱收尾', targets: ['音响'] },
   ]});
-  let st = await control.waitState((s) => s.sequence.length === 2);
-  check('序列已保存（2 条）', st.sequence.length === 2);
-  check('序号自动编号', st.sequence[0].seq === 1 && st.sequence[1].seq === 2);
+  let st = await control.waitState((s) => s.sequence.length === 4);
+  check('序列已保存（4 条）', st.sequence.length === 4);
+  check('序号自动编号', st.sequence[0].seq === 1 && st.sequence[3].seq === 4);
 
   console.log('2. 控制端开始演出');
   control.send({ type: 'start' });
@@ -90,14 +92,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('推进到第 2 条', st.currentCue.text.includes('音乐起'));
   check('上一条确认未串入下一条', Object.keys(st.confirmations).length === 0);
 
-  console.log('6. 未全员确认禁止推进');
+  console.log('6. 替岗校验：替补不能已是本条有效目标');
+  control.send({ type: 'substitute', from: '音响', to: '道具' });
+  await sleep(200);
+  check('替补已是有效目标被拒绝', control.errors.some((e) => e.includes('有效目标')));
+  check('替岗未生效', Object.keys(control.state.substitutions || {}).length === 0);
+
+  console.log('7. 未全员确认禁止推进');
   sound.send({ type: 'confirm' });
   await control.waitState((s) => s.confirmations['音响']);
   control.send({ type: 'advance' });
   await sleep(200);
   check('推进被拒绝（道具未确认）', control.errors.some((e) => e.includes('禁止推进')));
 
-  console.log('7. 超时标记 + 迟到确认');
+  console.log('8. 超时标记 + 迟到确认');
   await control.waitState((s) => s.timedOut.includes('道具'), 8000);
   check('道具超时未确认被标记', true);
   prop.send({ type: 'confirm' });
@@ -105,7 +113,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('迟到确认被接受且标记 late', st.confirmations['道具'].late === true);
   check('日志含 confirm-late', st.log.some((l) => l.event === 'confirm-late'));
 
-  console.log('8. 断线重连恢复状态');
+  console.log('9. 断线重连恢复状态');
   light.ws.close();
   await sleep(300);
   const light2 = client('position', '灯光');
@@ -114,12 +122,61 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('重连后恢复当前口令', st.currentCue.text.includes('音乐起'));
   check('重连后恢复确认状态', !!st.confirmations['音响'] && !!st.confirmations['道具']);
 
-  console.log('9. 推进至完成');
+  console.log('10. 推进到第 3 条，准备临时替岗');
+  control.send({ type: 'advance' });
+  st = await control.waitState((s) => s.currentCue && s.currentCue.seq === 3);
+  check('推进到第 3 条', st.currentCue.text.includes('灯光聚焦'));
+
+  console.log('11. 替岗非法场景校验');
+  control.send({ type: 'substitute', from: '灯光', to: '灯光' });
+  await sleep(150);
+  check('替补与原岗位相同被拒绝', control.errors.some((e) => e.includes('相同')));
+  control.send({ type: 'substitute', from: '灯光', to: '舞美' });
+  await sleep(150);
+  check('替补不在线被拒绝', control.errors.some((e) => e.includes('不在线')));
+  control.send({ type: 'substitute', from: '音响', to: '道具' });
+  await sleep(150);
+  check('原岗位不是本条目标被拒绝', control.errors.some((e) => e.includes('不是本条口令的目标岗位')));
+
+  console.log('12. 合法替岗：灯光 → 道具');
+  control.send({ type: 'substitute', from: '灯光', to: '道具' });
+  st = await control.waitState((s) => s.substitutions && s.substitutions['灯光']);
+  check('替岗生效（灯光→道具）', st.substitutions['灯光'].substitute === '道具');
+  check('替岗写入事件日志（原岗位/替补/时间）',
+    st.log.some((l) => l.event === 'position-substituted' && l.detail.from === '灯光' && l.detail.to === '道具' && !!l.ts));
+  control.send({ type: 'substitute', from: '灯光', to: '音响' });
+  await sleep(150);
+  check('重复替岗被拒绝', control.errors.some((e) => e.includes('已由')));
+
+  console.log('13. 原岗位不得再确认，替补确认计入推进条件');
+  light2.send({ type: 'confirm' });
+  await sleep(200);
+  check('原岗位确认被拒绝', light2.errors.some((e) => e.includes('替岗')));
+  prop.send({ type: 'confirm' });
+  st = await control.waitState((s) => s.confirmations['灯光']);
+  check('替补确认计入目标槽位', st.confirmations['灯光'].by === '道具');
+
+  console.log('14. 断线重连后替岗状态一致');
+  prop.ws.close();
+  await sleep(300);
+  const prop2 = client('position', '道具');
+  await prop2.ready;
+  st = await prop2.waitState((s) => s.currentCue && s.currentCue.seq === 3 && s.substitutions['灯光']);
+  check('重连后替岗状态保留', st.substitutions['灯光'].substitute === '道具');
+  check('重连后确认状态保留', !!st.confirmations['灯光']);
+
+  console.log('15. 推进后恢复导演编排的原目标');
+  control.send({ type: 'advance' });
+  st = await control.waitState((s) => s.currentCue && s.currentCue.seq === 4);
+  check('第 4 条使用原目标', st.currentCue.targets.length === 1 && st.currentCue.targets[0] === '音响');
+  check('替岗不串入下一条', Object.keys(st.substitutions).length === 0);
+  sound.send({ type: 'confirm' });
+  await control.waitState((s) => s.confirmations['音响']);
   control.send({ type: 'advance' });
   st = await control.waitState((s) => s.phase === 'done');
   check('全部口令完成', st.log.some((l) => l.event === 'sequence-finished'));
 
-  console.log('10. 重置后可重新编辑');
+  console.log('16. 重置后可重新编辑');
   control.send({ type: 'reset' });
   st = await director.waitState((s) => s.phase === 'idle');
   check('重置回 idle', true);
